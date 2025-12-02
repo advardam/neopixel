@@ -45,6 +45,11 @@ BUZZER_PIN = 18
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(BUZZER_PIN, GPIO.OUT)
 
+def beep(duration=0.1):
+    GPIO.output(BUZZER_PIN, GPIO.HIGH)
+    time.sleep(duration)
+    GPIO.output(BUZZER_PIN, GPIO.LOW)
+
 def read_solar():
     adc = spi.xfer2([1, (8 + 0) << 4, 0])
     return ((adc[1] & 3) << 8) + adc[2]
@@ -52,7 +57,7 @@ def read_solar():
 def send_arduino(cmd):
     if ser: ser.write(f"{cmd}\n".encode())
 
-# --- DATA: ELEMENTS 1-18 ---
+# --- ELEMENT DATA ---
 ELEMENTS = {
     "Hydrogen": "1,0,0,0", "Helium": "2,0,0,0", "Lithium": "2,1,0,0",
     "Beryllium": "2,2,0,0", "Boron": "2,3,0,0", "Carbon": "2,4,0,0",
@@ -62,7 +67,7 @@ ELEMENTS = {
     "Sulfur": "2,8,6,0", "Chlorine": "2,8,7,0", "Argon": "2,8,8,0"
 }
 
-# --- COLOR CARD LOADING ---
+# --- COLOR MATCHING ---
 known_colors = []
 try:
     with open('color_card.json', 'r') as f:
@@ -87,10 +92,9 @@ app = Flask(__name__)
 state = {
     "mode": 1,
     "mode2_demo": True,
-    "mode2_base": "Hydrogen", # Default base for transitions
+    "mode2_base": "Hydrogen", 
     "temp": 0.0,
     "solar": 0,
-    "color": "None",
     "photo_current": 0.0,
     "decay_count": 43,
     "decay_halflife": 10,
@@ -101,20 +105,18 @@ state = {
 def sensor_logic():
     last_color_time = 0
     while True:
-        # Temp
         try:
             t = temp_sensor.get_temperature() if temp_sensor else 25.0
             state["temp"] = round(t, 1)
         except: pass
 
-        # Solar
         try:
             s = read_solar()
             state["solar"] = s
             state["photo_current"] = round((s / 235.0) * 50.0, 1)
         except: pass
 
-        # Color (Mode 2 Real)
+        # Mode 2: Color Reading
         if state["mode"] == 2 and not state["mode2_demo"] and color_sensor:
             if time.time() - last_color_time > 1.5:
                 try:
@@ -125,8 +127,8 @@ def sensor_logic():
                         last_color_time = time.time()
                 except: pass
 
-        # Mode Logic
-        if state["mode"] == 3: # Thermodynamics
+        # Mode 3: Thermodynamics
+        if state["mode"] == 3:
             diff = max(0, state["temp"] - 25.0)
             speed = 1.0 + (diff * 0.8)
             send_arduino(f"SPEED:{speed}")
@@ -135,16 +137,17 @@ def sensor_logic():
             else: send_arduino("COLOR:0,255,0") 
             send_arduino("CONF:2,4,0,0") 
 
-        elif state["mode"] == 4: # Photoelectric
+        # Mode 4: Photoelectric
+        elif state["mode"] == 4:
             s = state["solar"]
-            # Tuned thresholds based on your calibration
             if s < 30: send_arduino("CONF:0,0,0,0")
             elif s < 100: send_arduino("CONF:1,0,0,0")
             elif s < 180: send_arduino("CONF:2,4,0,0")
             else: send_arduino("CONF:2,8,8,4")
             send_arduino("SPEED:2.0")
 
-        elif state["mode"] == 5: # Band Theory
+        # Mode 5: Band Theory
+        elif state["mode"] == 5:
             s = state["solar"]
             if s > 180:
                 send_arduino("CONF:2,8,0,4"); send_arduino("COLOR:255,200,0") 
@@ -153,22 +156,26 @@ def sensor_logic():
 
         time.sleep(0.1)
 
-# --- TRANSITION LOGIC (Updated for Red/Blue/Violet/White) ---
+# --- TRANSITION LOGIC (UPDATED) ---
 def process_transition(color):
-    # Logic based on relative jumps
-    # White = De-excitation (Reset to Base)
+    # De-excitation (Release Photon)
     if color == "White":
-        send_arduino("FLASH:255,255,255")
+        beep(0.3) # Long beep for release
+        
+        # Determine Color of Flash based on current excitement (Conceptual)
+        # We assume Blue flash for high energy drop, Red for low
+        # For simplicity, we alternate or pick based on last excited state
+        send_arduino("FLASH:0,0,255") # Blue Flash for photon
+        
         time.sleep(0.5)
         # Reset to base element
         base_conf = ELEMENTS.get(state["mode2_base"], "1,0,0,0")
         send_arduino(f"CONF:{base_conf}")
         return
 
-    # For transitions, we map colors to specific target Shells
-    # Red = Low Energy (L Shell)
-    # Blue = Med Energy (M Shell)
-    # Violet = High Energy (N Shell)
+    # Excitation
+    # Beep on detection
+    beep(0.1) 
     
     if color == "Red": send_arduino("CONF:0,1,0,0")   # Jump to L
     elif color == "Blue": send_arduino("CONF:0,0,1,0") # Jump to M
@@ -184,7 +191,7 @@ def decay_logic():
             state["decay_count"] = N0
             
             while state["decay_count"] > 0 and state["mode"] == 6 and state["decay_running"]:
-                time.sleep(0.5) # Smoother updates (2Hz)
+                time.sleep(0.5)
                 elapsed += 0.5
                 rem = int(N0 * pow(0.5, elapsed / t_half))
                 lost = state["decay_count"] - rem
@@ -195,12 +202,11 @@ def decay_logic():
                     for _ in range(events):
                         if random.randint(0, 10) > 7:
                             send_arduino("DECAY:ALPHA")
-                            GPIO.output(BUZZER_PIN, 1); time.sleep(0.05); GPIO.output(BUZZER_PIN, 0)
+                            beep(0.05)
                         else:
                             send_arduino("DECAY:BETA")
-                            GPIO.output(BUZZER_PIN, 1); time.sleep(0.01); GPIO.output(BUZZER_PIN, 0)
+                            beep(0.01)
                 
-                # Update Visuals
                 k = min(rem, 2); rem -= k
                 l = min(rem, 8); rem -= l
                 m = min(rem, 12); rem -= m
@@ -212,18 +218,19 @@ def decay_logic():
 # --- WEB ROUTES ---
 @app.route('/')
 def index(): 
-    # Pass elements list to template for Mode 1
-    return render_template('index.html', elem_list=list(ELEMENTS.keys()))
+    # List of all 18 elements for Mode 1
+    elem_list = list(ELEMENTS.keys())
+    return render_template('index.html', elem_list=elem_list)
 
 @app.route('/set_mode/<int:m>')
 def set_mode(m):
     state["mode"] = m
-    state["decay_running"] = False # Stop decay on mode switch
+    state["decay_running"] = False 
     send_arduino("MODE:NORMAL"); send_arduino("SPEED:1.0"); send_arduino("COLOR:0,255,255")
     
     if m == 6: 
         send_arduino("MODE:RADIO_ON")
-        send_arduino("CONF:2,8,8,16") # Show full atom ready to decay
+        send_arduino("CONF:2,8,8,16")
     if m == 5: send_arduino("MODE:BAND_ON")
     if m == 2: 
         # Load the selected base element
@@ -240,7 +247,6 @@ def set_mode2_type(type):
 @app.route('/mode2/set_base/<elem>')
 def set_mode2_base(elem):
     state["mode2_base"] = elem
-    # Apply immediately
     if state["mode"] == 2:
         base_conf = ELEMENTS.get(elem, "1,0,0,0")
         send_arduino(f"CONF:{base_conf}")
@@ -268,7 +274,6 @@ def start_decay():
 @app.route('/get_data')
 def get_data(): return jsonify(state)
 
-# --- START ---
 t1 = threading.Thread(target=sensor_logic); t1.daemon = True; t1.start()
 t2 = threading.Thread(target=decay_logic); t2.daemon = True; t2.start()
 
